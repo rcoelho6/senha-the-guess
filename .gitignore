@@ -1,0 +1,46 @@
+# Java / Gradle
+.gradle/
+**/build/
+**/out/
+target/
+*.class
+*.jar
+*.war
+hs_err_pid*
+replay_pid*
+
+# IDEs e editores
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Node.js (caso o cliente web/mobile seja adicionado ao repositório)
+node_modules/
+dist/
+.next/
+coverage/
+
+# Segredos e configuração local
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs e arquivos temporários
+*.log
+logs/
+tmp/
+temp/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Terraform e estado de infraestrutura
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
