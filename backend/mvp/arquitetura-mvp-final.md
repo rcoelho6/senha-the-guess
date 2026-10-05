@@ -16,7 +16,7 @@
 
 ## 3. Heartbeat e presença
 
-O cliente envia `POST /gameplay/{gameplay-id}/{player-id}` a cada **500 ms**. O serviço grava o horário de recebimento com precisão de milissegundos e retorna o estado.
+O cliente envia `PATCH /games/{gameplayId}/presence` a cada **500 ms**, sem corpo; o serviço grava o horário de recebimento com precisão de milissegundos e retorna o estado conforme o contrato da [documentação técnica](./tech-docs/arquitetura-tecnica-mvp.md).
 
 No Redis, por partida:
 
