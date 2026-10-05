@@ -1,5 +1,6 @@
 package com.senhadeguess.backend.persistence.api.dto;
 
-public class GameRecordAcceptedResponse {
-}
+import java.time.Instant;
 
+public record GameRecordAcceptedResponse(String gameplayId, boolean accepted, Instant receivedAt) {
+}

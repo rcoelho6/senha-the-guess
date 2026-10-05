@@ -1,0 +1,12 @@
+server:
+  port: ${SERVER_PORT:8080}
+spring:
+  application:
+    name: gameplay
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+services:
+  persistence:
+    base-url: ${PERSISTENCE_BASE_URL:http://localhost:8081}

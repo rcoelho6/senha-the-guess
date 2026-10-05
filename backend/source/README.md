@@ -1,28 +1,50 @@
 # Backend — Jogo de senha
 
-Projeto Maven multi-módulo baseado na arquitetura MVP. Usa Java 21 e Spring Boot 4.1.1, versão compatível com Java 21 conforme a documentação oficial.
+Backend multi-módulo do MVP, em Java 21 e Spring Boot 4.1.1.
 
 ## Módulos
 
-- **`gameplay`**: API REST, lógica/domínio da partida, Redis como estado corrente e cliente HTTP para integração com Persistência. Dependências planejadas: Spring MVC, RestClient, validação e Spring Data Redis (Lettuce).
-- **`persistence`**: API interna, validação de IDs e gravação histórica append-only. Dependências planejadas: Spring MVC, validação, Spring Data JPA/Hibernate e driver JDBC do PostgreSQL.
-- Os dois módulos usam `spring-boot-starter-test` para a futura suíte de testes. As versões das dependências são gerenciadas pelo parent/BOM Spring Boot no `pom.xml` raiz.
+- **`gameplay`** (porta `8080`): API REST do jogo, regras de senha/palpite, timeout e estado ativo no Redis. Atualizações de histórico são enviadas em background para Persistência.
+- **`persistence`** (porta `8081`): API interna para validar jogadores existentes e aceitar gravações históricas append-only no PostgreSQL.
+- As dependências são gerenciadas pelo parent Spring Boot do POM raiz. Os dois serviços incluem starters de teste.
 
-## Build
+## Requisitos e execução local
 
-Na raiz deste diretório, o reactor Maven reconhece os módulos com `mvn test` ou `mvn package` (requer Maven 3.6.3+ e JDK 21). As classes de aplicação ainda são placeholders vazios; por isso, embora a estrutura e dependências Maven estejam definidas, os serviços ainda não iniciam como aplicações Spring Boot. O reempacotamento executável do Spring Boot está desativado pela propriedade `spring-boot.repackage.skip` e deve ser habilitado quando as classes de inicialização forem implementadas.
+Requer JDK 21, Maven 3.6.3+ e Docker Desktop iniciado. A partir desta pasta (`backend/source`):
 
-## Estrutura
-
-```text
-source/
-├── pom.xml
-├── gameplay/
-│   ├── pom.xml
-│   └── src/{main,test}/...
-└── persistence/
-    ├── pom.xml
-    └── src/{main,test}/...
+```powershell
+docker compose up -d
+mvn test
 ```
 
-Não há lógica, campos, métodos ou anotações nas classes nesta etapa.
+Em dois terminais, também nesta pasta:
+
+```powershell
+mvn -pl persistence spring-boot:run
+```
+
+```powershell
+mvn -pl gameplay spring-boot:run
+```
+
+O Compose inicia Redis em `localhost:6379` e PostgreSQL em `localhost:5432`. O banco local de desenvolvimento é `senha_game` (usuário `senha_game`, senha `senha_game_dev`). Os IDs fictícios `player-123`, `player-456` e `player-789` são inseridos automaticamente apenas na primeira inicialização do volume do banco. Para reinicializar esse seed: `docker compose down -v` (isso apaga os dados locais do PostgreSQL).
+
+## API Gameplay
+
+- `POST /games` — cria partida com `playerId` e `opponentPlayerId`.
+- `PATCH /games/{gameplayId}/players/{playerId}/join` e `/decline` — entrada/recusa do oponente.
+- `PUT /games/{gameplayId}/players/{playerId}/secret` — define a senha (`{"digits":"0482"}`).
+- `PATCH /games/{gameplayId}/players/{playerId}/heartbeat` — presença; mais de cinco segundos encerra por timeout.
+- `PUT /games/{gameplayId}/players/{playerId}/guess` — envia palpite (`{"digits":"1234"}`).
+- `GET /games/{gameplayId}/state` — estado público da partida, sem revelar senhas.
+
+## API interna de Persistência
+
+- `GET /internal/v1/players/{playerId}` — valida existência do jogador.
+- `POST /internal/v1/game-records` — aceita snapshot para processamento assíncrono (`202 Accepted`). A resposta não confirma commit durável.
+
+## Limites do MVP
+
+Não há autenticação/autorização forte; os `playerId` são declarações do cliente. Turnos são responsabilidade do frontend. Redis é autoritativo durante a partida; a escrita no PostgreSQL é eventual, sem outbox, fila durável ou retry garantido. As senhas não são incluídas nos snapshots históricos nem retornadas pela API, mas ficam em texto claro no Redis; não exponha esta versão a dados sensíveis ou tráfego público sem adicionar controles de segurança.
+
+As duas chaves Redis por partida são atualizadas em transações otimistas `WATCH/MULTI/EXEC`, com hash-tag comum para compatibilidade com Redis Cluster. O histórico armazena JSON serializado como texto PostgreSQL, append-only, ordenável pelo timestamp emitido pelo Gameplay; timestamp não garante ordenação total entre instâncias.

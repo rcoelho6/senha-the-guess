@@ -1,5 +1,4 @@
 package com.senhadeguess.backend.gameplay.domain;
 
-public class GuessResult {
+public record GuessResult(int correct, int partial) {
 }
-

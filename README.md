@@ -1,48 +1,30 @@
 # Jogo de senha — MVP
 
-Documentação de arquitetura para um MVP de jogo de senha entre dois jogadores. Cada pessoa usa seu ID de usuário já cadastrado; o oponente entra com seu ID e o `gameplayId` compartilhado pelo criador da partida. Os jogadores definem senhas de quatro algarismos distintos, alternam palpites pela interface e recebem contagens de corretos e parciais.
+Backend do MVP de jogo de senha entre dois jogadores. Os jogadores usam IDs já cadastrados; o oponente entra com seu ID e o `gameplayId` compartilhado pelo criador. Cada jogador define uma senha de quatro algarismos distintos e recebe contagens de corretos e parciais nos palpites.
 
-> **Estado do repositório:** contém documentação e proposta de arquitetura; o código da aplicação ainda não foi criado.
+> **Estado do repositório:** a implementação inicial dos serviços Gameplay e Persistência está em `backend/source`; limites e débitos de segurança/resiliência descritos abaixo continuam valendo.
 
 ## Arquitetura resumida
 
-- **Gameplay:** controla partida, senhas, palpites, resultados e presença.
-- **Redis:** fonte da verdade durante a partida ativa; mantém duas chaves por partida: uma para presença/timeout e outra para o estado acumulativo da gameplay.
-- **Persistência:** PostgreSQL append-only recebe atualizações de forma assíncrona e tem consistência eventual. Não é consultado para responder à gameplay ativa.
-- **Heartbeat:** uma chamada por segundo por jogador; se qualquer jogador ficar mais de cinco segundos sem heartbeat, a partida termina por timeout.
-- **Identidade:** na MVP não há login, sessão ou token; os IDs são digitados e validados no início/entrada. Isso é uma limitação de segurança explicitamente aceita.
-- A emissão à Persistência não deve bloquear a thread de gameplay, mas tamanho de fila, polling, retry, replay e garantia ponta a ponta não são gerenciados na MVP.
+- **Gameplay:** API REST para criação/entrada/recusa de partidas, senhas, palpites, resultados e heartbeat.
+- **Redis:** fonte da verdade durante a partida; duas chaves por gameplay, estado e presença, atualizadas em transações otimistas.
+- **Persistência:** valida IDs já cadastrados e recebe snapshots assíncronos append-only no PostgreSQL. Não responde estado de partida ativa.
+- **Heartbeat:** clientes enviam uma chamada por segundo; ausência por mais de cinco segundos encerra por timeout.
+- **Identidade:** sem login/sessão/token; IDs são fornecidos pelo cliente. É uma limitação conhecida do MVP.
+- **Histórico:** envio assíncrono sem fila durável, retry ou garantia de commit antes do `202 Accepted`.
+
+## Código e execução
+
+O código-fonte, POMs dos módulos, configuração local e instruções estão em [backend/source](backend/source/README.md). O projeto usa Java 21, Spring Boot 4.1.1 e módulos Maven independentes `gameplay` e `persistence`. Docker Compose prepara Redis e PostgreSQL; IDs de demonstração são inseridos no banco local.
 
 ## Documentação
 
-- [Resumo final do MVP](backend/mvp/arquitetura-mvp-final.md) — regras, fluxo, decisões e limites.
-- [Especificação técnica](backend/mvp/tech-docs/arquitetura-tecnica-mvp.md) — arquitetura, contratos HTTP, payloads e modelos de dados.
-- [Problemas possíveis e débitos técnicos](backend/mvp/tech-docs/riscos-e-mitigacoes-mvp.md) — matriz de problemas, status na MVP, motivos e caminhos de evolução.
-- [Proposta inicial de arquitetura](backend/proposta%20inicial/arquitetura-backend-senha.md) — documento conceitual inicial; pode refletir premissas anteriores à definição atual da MVP.
+- [Instruções para build e execução](backend/source/README.md)
+- [Resumo final do MVP](backend/mvp/arquitetura-mvp-final.md)
+- [Especificação técnica](backend/mvp/tech-docs/arquitetura-tecnica-mvp.md)
+- [Problemas possíveis e débitos técnicos](backend/mvp/tech-docs/riscos-e-mitigacoes-mvp.md)
+- [Proposta inicial de arquitetura](backend/proposta%20inicial/arquitetura-backend-senha.md) — documento conceitual anterior às decisões finais do MVP.
 
-## Escopo conhecido
+## Limites conhecidos
 
-A MVP aceita perda de dados se Redis falhar, não implementa replay, não garante idempotência ponta a ponta e deixa a alternância dos turnos sob controle do frontend. A análise completa e os motivos desses débitos estão na [documentação de riscos](backend/mvp/tech-docs/riscos-e-mitigacoes-mvp.md).
-
-## Estrutura
-
-```text
-.
-├── .gitignore
-├── README.md
-└── backend/
-    ├── mvp/
-    │   ├── arquitetura-backend-v1.md
-    │   ├── arquitetura-backend-v2-mvp.md
-    │   ├── arquitetura-backend-v3-mvp.md
-    │   ├── arquitetura-mvp-final.md
-    │   └── tech-docs/
-    │       ├── arquitetura-tecnica-mvp.md
-    │       └── riscos-e-mitigacoes-mvp.md
-    └── proposta inicial/
-        └── arquitetura-backend-senha.md
-```
-
-## Execução
-
-Ainda não há código, configuração Gradle ou infraestrutura implantável neste repositório. Os documentos descrevem uma proposta técnica; instruções de build, testes e execução serão adicionadas quando a implementação for iniciada.
+Não há autenticação nem autorização forte; IDs digitados podem ser falsificados. Turnos e concorrência de palpites são responsabilidade do frontend. Redis é autoritativo durante a partida, e sua falha pode causar perda do estado. PostgreSQL é histórico eventualmente consistente; envio assíncrono não tem retry/outbox nem idempotência ponta a ponta. Esta implementação não deve ser exposta a tráfego público ou dados sensíveis sem controles adicionais.

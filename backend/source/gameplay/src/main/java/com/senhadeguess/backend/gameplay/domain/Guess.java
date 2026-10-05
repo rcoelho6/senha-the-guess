@@ -1,5 +1,6 @@
 package com.senhadeguess.backend.gameplay.domain;
 
-public class Guess {
-}
+import java.time.Instant;
 
+public record Guess(String playerId, String digits, GuessResult result, Instant createdAt) {
+}

@@ -1,4 +1,4 @@
-package com.senhadeguess.backend.persistence.api.dto;
+package com.senhadeguess.backend.gameplay.infrastructure.persistence;
 
 public record PlayerValidationResponse(String playerId, boolean exists) {
 }

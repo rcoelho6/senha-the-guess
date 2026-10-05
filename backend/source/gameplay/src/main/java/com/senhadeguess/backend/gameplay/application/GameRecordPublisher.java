@@ -1,5 +1,7 @@
 package com.senhadeguess.backend.gameplay.application;
 
-public class GameRecordPublisher {
-}
+import com.senhadeguess.backend.gameplay.domain.GameRecord;
 
+public interface GameRecordPublisher {
+    void publish(GameRecord record);
+}
