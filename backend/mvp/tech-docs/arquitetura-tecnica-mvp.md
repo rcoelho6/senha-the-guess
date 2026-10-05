@@ -1,52 +1,71 @@
 # MVP do jogo de senha — especificação técnica
 
-Todas as rotas públicas abaixo exigem JWT válido do Amazon Cognito. O jogador que executa a ação é identificado pelo `sub` autenticado; não se aceita um `playerId` arbitrário como identidade do autor. As rotas `/internal` são privadas e exigem autenticação entre serviços.
+> **Estado:** proposta documental. O código ainda não foi criado. As decisões e limitações abaixo refletem o escopo simplificado da MVP.
 
-**Formato comum:** JSON em UTF-8 (`Content-Type: application/json`) quando houver corpo. Datas e horários usam ISO 8601 UTC. Senhas e palpites são strings de exatamente quatro algarismos, para preservar zeros à esquerda, e contêm algarismos distintos de 0 a 9.
-
-**Erros:** as respostas de erro usam `{ "code": "...", "message": "...", "traceId": "..." }`. Códigos HTTP esperados: `400` entrada inválida, `401` não autenticado, `403` sem autorização para a partida, `404` recurso inexistente, `409` conflito com o estado atual e `503` indisponibilidade temporária. Segredos nunca são incluídos em respostas destinadas ao oponente nem em logs.
+**Regras comuns:** payloads JSON UTF-8 quando indicado; timestamps ISO 8601 UTC gerados no serviço Gameplay. Senhas e palpites são strings de quatro algarismos distintos entre `0` e `9`, preservando zeros à esquerda.
 
 ## 1. Gameplay
 
-### Responsabilidade e arquitetura
+### Responsabilidades e decisões da MVP
 
-Gameplay é responsável por convites, decisões, senhas, turnos, palpites, feedback, presença e transições da partida. Mantém o estado operacional no MemoryDB compatível com Redis e responde ao jogador sem esperar a persistência assíncrona. Cada transição valida o estado anterior e atualiza estado, sequência e outbox atomicamente.
+Gameplay controla a partida e usa Redis como **fonte da verdade durante a gameplay**. O serviço não consulta o PostgreSQL para responder ações ou consultas de partidas ativas. PostgreSQL recebe atualizações append-only assincronamente e tem consistência eventual.
 
-**Stack proposta:** Java 21, Spring Boot 3 e Gradle multi-módulo. Gameplay e Persistência podem ser empacotados juntos ou executados como serviços separados, sem alterar os contratos REST.
+A MVP não implementa login, sessão nem token. O cliente envia os IDs digitados pelos jogadores. O serviço valida a existência desses IDs na criação/entrada da partida, antes do início da gameplay. Durante uma partida ativa, operações usam o estado em cache e não consultam Persistência.
+
+O jogador que cria a partida compartilha o `gameplayId` com o oponente por canal externo. O oponente digita o seu `playerId` e o `gameplayId` para entrar; não há fluxo de notificação de convite que aguarde aceite síncrono.
+
+### Arquitetura
 
 ```mermaid
 flowchart LR
-    C[Cliente web/mobile] -->|HTTPS + JWT| A[ALB]
-    A -->|rotas de jogo| G[Gameplay API]
-    A -->|/players| P[Persistence API]
-    G -->|estado atômico + outbox| R[(MemoryDB / Redis)]
-    R --> O[Outbox relay]
-    O -->|REST privado, retries| P
-    P --> D[(RDS PostgreSQL)]
-    C --> I[Amazon Cognito]
+    C["Cliente: playerId digitado"] -->|REST| G[Gameplay API]
+    G -->|validação pré-jogo| P[Persistence API]
+    G -->|atualização atômica| R[(Redis - fonte da verdade)]
+    G -.->|envio assíncrono sem retry gerenciado| P
+    P --> D[(PostgreSQL append-only)]
 ```
+
+Java 21 / Spring Boot 3 e módulos Gameplay/Persistência são uma proposta de implementação, não código existente. As chamadas assíncronas não devem bloquear a thread que atende gameplay. Detalhes de transporte/armazenamento da fila assíncrona não constituem garantia da MVP.
+
+### Modelo de chaves Redis
+
+Por `gameplayId`, manter duas chaves, na mesma hash slot quando Redis Cluster exigir atomicidade entre elas:
+
+- `{gameplayId}:presence`: heartbeat/timestamp mais recente e informação de timeout dos dois jogadores.
+- `{gameplayId}:game`: estado atual e acumulativo da partida — IDs dos jogadores, estado de entrada/aceite/recusa, senhas escolhidas, palpites e resultados.
+
+A atualização do estado relevante é atômica por partida. Partidas diferentes usam chaves independentes; não há lock global entre partidas. Palpites e resultados são acumulados na chave da gameplay durante a partida, e não substituídos pelo último palpite.
+
+O estado na chave da partida é único/autoritativo durante gameplay. Não se define nesta MVP expiração, recuperação por replay ou reconstrução da partida perdida após falha do Redis.
 
 ### Contratos HTTP de Gameplay
 
+Todas as rotas recebem `playerId` no caminho ou no corpo, pois não há identidade autenticada. Conhecer ou informar um `playerId` **não prova controle** sobre a conta; isso é limitação conhecida da MVP.
+
 | Método e endpoint | Entrada | Saída de sucesso |
 |---|---|---|
-| `POST /games/invitations` | JSON: `inviteePlayerId` | `201 Created`: convite criado como `PENDING`, incluindo `gameplayId` |
-| `GET /games/invitations?status=PENDING` | Sem corpo; filtro opcional `status` | `200 OK`: lista de convites visíveis ao jogador autenticado |
-| `PATCH /games/{gameplayId}/accept` | Sem corpo | `200 OK`: estado atualizado para `ACCEPTED` |
-| `PATCH /games/{gameplayId}/decline` | Sem corpo | `200 OK`: estado atualizado para `DECLINED` |
-| `PUT /games/{gameplayId}/secret` | JSON: `digits` | `200 OK`: confirmação de senha definida e estado atual da partida, sem devolver a senha |
-| `PATCH /games/{gameplayId}/presence` | Sem corpo; o servidor registra o horário de recebimento | `200 OK`: horário registrado, estado online e eventual suspensão |
-| `PUT /games/{gameplayId}/guess` | JSON: `requestId` e `digits` | `200 OK`: confirmação do palpite e feedback de corretos/parciais |
-| `GET /games/{gameplayId}/updates?afterSequence={n}` | Sem corpo; cursor opcional `afterSequence` (padrão `0`) | `200 OK`: eventos visíveis posteriores ao cursor e próximo cursor |
-| `GET /games/{gameplayId}/state` | Sem corpo | `200 OK`: estado visível da partida para o jogador autenticado |
+| `POST /games` | JSON: `playerId`, `opponentPlayerId` | `201 Created`: `gameplayId` e partida aguardando o oponente |
+| `PATCH /games/{gameplayId}/players/{playerId}/join` | Sem corpo | `200 OK`: jogador ingressou; estado atualizado |
+| `PATCH /games/{gameplayId}/players/{playerId}/decline` | Sem corpo | `200 OK`: partida marcada como recusada/encerrada |
+| `PUT /games/{gameplayId}/players/{playerId}/secret` | JSON: `digits` | `200 OK`: confirmação e indicação se ambos definiram senha; nunca devolve a senha |
+| `PATCH /games/{gameplayId}/players/{playerId}/heartbeat` | Sem corpo | `200 OK`: horário do servidor e estado de presença; timeout encerra a partida |
+| `PUT /games/{gameplayId}/players/{playerId}/guess` | JSON: `digits` | `200 OK`: palpite registrado e contagens de corretos/parciais |
+| `GET /games/{gameplayId}/state` | Sem corpo | `200 OK`: estado corrente e palpites/resultados visíveis na partida |
+| `GET /internal/v1/players/{playerId}` | Sem corpo; rota entre serviços | `200 OK`: existência do ID; `404` se não existir |
+| `POST /internal/v1/game-records` | JSON: atualização/snapshot append-only com timestamp Gameplay | `202 Accepted`: recebimento para gravação assíncrona |
 
-#### Abrir convite — `POST /games/invitations`
+> Os caminhos e DTOs abaixo estabelecem um contrato proposto para tornar explícito o fluxo de IDs manuais. Devem ser implementados e validados com o frontend; a documentação não representa rotas já implementadas.
+
+#### Criar gameplay — `POST /games`
+
+A criação verifica que `playerId` e `opponentPlayerId` existem. Como a checagem depende do módulo de Persistência, essa verificação ocorre somente na criação, antes da gameplay; falha temporária não deve ser interpretada como ID inexistente. O criador compartilha o identificador retornado com o oponente.
 
 Entrada:
 
 ```json
 {
-  "inviteePlayerId": "player-456"
+  "playerId": "player-123",
+  "opponentPlayerId": "player-456"
 }
 ```
 
@@ -54,69 +73,46 @@ Saída (`201 Created`):
 
 ```json
 {
-  "gameplayId": "game-123",
-  "status": "PENDING",
-  "inviterPlayerId": "player-123",
-  "inviteePlayerId": "player-456",
-  "createdAt": "2026-10-05T14:30:00Z"
+  "gameplayId": "game-789",
+  "status": "WAITING_FOR_OPPONENT",
+  "playerIds": ["player-123", "player-456"],
+  "createdAt": "2026-10-05T15:00:00Z"
 }
 ```
 
-Gameplay confirma que o jogador convidado existe por meio do módulo de Persistência. Um alvo inexistente resulta em `404`; não se cria a partida.
+#### Entrada ou recusa — `PATCH /games/{gameplayId}/players/{playerId}/join` e `/decline`
 
-#### Consultar convites — `GET /games/invitations?status=PENDING`
+Sem corpo. O endpoint `join` identifica o participante pelo `playerId` da rota e valida que ele é o oponente esperado; a checagem de existência ocorre antes do estado `ACTIVE`, não a cada ação da partida. A rota `decline` também identifica o jogador pela rota. A MVP não prova criptograficamente a identidade alegada.
 
-Entrada: sem corpo. `status` é um filtro opcional; se omitido, a API usa `PENDING`.
-
-Saída (`200 OK`):
+Saída de `join` (`200 OK`):
 
 ```json
 {
-  "items": [
-    {
-      "gameplayId": "game-123",
-      "status": "PENDING",
-      "inviterPlayerId": "player-123",
-      "inviteePlayerId": "player-456",
-      "createdAt": "2026-10-05T14:30:00Z"
-    }
-  ]
-}
-```
-
-A lista inclui apenas partidas das quais o jogador autenticado participa e que correspondem ao filtro.
-
-#### Aceitar ou recusar — `PATCH /games/{gameplayId}/accept` e `PATCH /games/{gameplayId}/decline`
-
-Ambas as operações não recebem corpo. Somente o convidado designado pode decidir enquanto o convite estiver `PENDING`. A transição é atômica; repetir a mesma decisão retorna o estado atual, e tentar a decisão oposta após a primeira decisão retorna `409 Conflict`.
-
-Saída de `PATCH /games/{gameplayId}/accept` (`200 OK`):
-
-```json
-{
-  "gameplayId": "game-123",
+  "gameplayId": "game-789",
   "status": "ACCEPTED",
-  "updatedAt": "2026-10-05T14:31:00Z"
+  "playerId": "player-456",
+  "updatedAt": "2026-10-05T15:01:00Z"
 }
 ```
 
-Saída de `PATCH /games/{gameplayId}/decline` (`200 OK`):
+Saída de `decline` (`200 OK`):
 
 ```json
 {
-  "gameplayId": "game-123",
+  "gameplayId": "game-789",
   "status": "DECLINED",
-  "updatedAt": "2026-10-05T14:31:00Z"
+  "playerId": "player-456",
+  "updatedAt": "2026-10-05T15:01:00Z"
 }
 ```
 
-#### Definir ou atualizar senha — `PUT /games/{gameplayId}/secret`
+#### Definir senha — `PUT /games/{gameplayId}/players/{playerId}/secret`
 
 Entrada:
 
 ```json
 {
-  "digits": "4820"
+  "digits": "0482"
 }
 ```
 
@@ -124,41 +120,53 @@ Saída (`200 OK`):
 
 ```json
 {
-  "gameplayId": "game-123",
-  "status": "ACCEPTED",
+  "gameplayId": "game-789",
+  "status": "ACTIVE",
+  "playerId": "player-123",
   "ownSecretSet": true,
-  "bothSecretsSet": false
+  "bothSecretsSet": true
 }
 ```
 
-A resposta pode trazer `status: "ACTIVE"` e `bothSecretsSet: true` quando os dois jogadores já definiram suas senhas. A senha não é devolvida na resposta. A rota substitui a senha do próprio jogador; a autenticação e a participação na partida são validadas.
+A senha é gravada no estado autoritativo da partida, não é devolvida na resposta e não deve aparecer em logs. A partida passa a `ACTIVE` quando ambos os jogadores tiverem entrado e definido uma senha válida.
 
-#### Heartbeat / presença — `PATCH /games/{gameplayId}/presence`
+#### Heartbeat — `PATCH /games/{gameplayId}/players/{playerId}/heartbeat`
 
-Entrada: sem corpo. O horário é gerado pelo servidor no recebimento, com precisão de milissegundos. O cliente envia esta chamada a cada 500 ms enquanto estiver conectado.
+Sem corpo. Cada jogador envia um heartbeat por segundo. O servidor atualiza o timestamp ao recebê-lo e, após a atualização, verifica os dois jogadores. Para participante ainda sem timestamp, o instante de ativação da partida serve como referência inicial.
 
-Saída (`200 OK`):
+Se qualquer participante estiver sem heartbeat por **mais de 5 segundos**, a partida termina com status `FINISHED` e motivo `TIMEOUT`. Não há suspensão nem janela de reconexão nesta regra da MVP.
+
+Saída sem timeout (`200 OK`):
 
 ```json
 {
-  "gameplayId": "game-123",
-  "updatedAt": "2026-10-05T14:31:00.123Z",
-  "gameplayOnline": true,
-  "suspended": false
+  "gameplayId": "game-789",
+  "playerId": "player-123",
+  "updatedAt": "2026-10-05T15:02:00Z",
+  "status": "ACTIVE"
 }
 ```
 
-O contrato mantém os mesmos campos quando a partida é suspensa (`gameplayOnline: false`, `suspended: true`). O estado terminal/suspenso permanece consultável mesmo que as chaves temporárias de presença sejam removidas.
+Saída quando o timeout é atingido (`200 OK`):
 
-> **Regra de timeout pendente de confirmação:** a regra recebida zera o contador quando algum jogador está sem heartbeat há mais de 5 segundos, mas o incrementa quando nenhum está atrasado. Aplicada literalmente, pode suspender uma partida online após três chamadas e não contar a ausência. A especificação do payload agora é uniforme, mas a lógica de negócio do timeout ainda precisa ser confirmada antes da implementação.
+```json
+{
+  "gameplayId": "game-789",
+  "playerId": "player-123",
+  "updatedAt": "2026-10-05T15:02:00Z",
+  "status": "FINISHED",
+  "finishReason": "TIMEOUT"
+}
+```
 
-#### Enviar palpite — `PUT /games/{gameplayId}/guess`
+A frequência corresponde a até **dois heartbeats por segundo por partida ativa**, antes das demais chamadas. Essa taxa deve ser considerada no dimensionamento; reduzir intervalo de heartbeat fica como evolução.
+
+#### Enviar palpite — `PUT /games/{gameplayId}/players/{playerId}/guess`
 
 Entrada:
 
 ```json
 {
-  "requestId": "c0f3b9e8-7a5d-4c10-a765-123456789abc",
   "digits": "1234"
 }
 ```
@@ -167,129 +175,78 @@ Saída (`200 OK`):
 
 ```json
 {
-  "gameplayId": "game-123",
-  "requestId": "c0f3b9e8-7a5d-4c10-a765-123456789abc",
-  "sequence": 17,
-  "status": "ACTIVE",
+  "gameplayId": "game-789",
+  "playerId": "player-123",
+  "guess": "1234",
   "result": {
     "correct": 1,
     "partial": 2
   },
-  "createdAt": "2026-10-05T14:32:00Z"
+  "status": "ACTIVE",
+  "createdAt": "2026-10-05T15:03:00Z"
 }
 ```
 
-O servidor valida que a partida está `ACTIVE`, que é a vez do jogador autenticado e que o palpite contém quatro algarismos distintos. `requestId` é obrigatório para deduplicar retries: repetir o mesmo identificador e conteúdo devolve o resultado já calculado sem registrar uma segunda jogada; reutilizá-lo com conteúdo diferente resulta em `409 Conflict`. O feedback informa somente as contagens, nunca a senha.
+O backend valida o formato e calcula feedback usando a senha do oponente. Nesta MVP, a alternância de turnos e o bloqueio de chutes simultâneos ficam a cargo do frontend; o backend não promete serializar nem rejeitar duas submissões concorrentes por turno. Não há `requestId` nem garantia de idempotência de retry ponta a ponta.
 
-#### Consultar atualizações — `GET /games/{gameplayId}/updates?afterSequence={n}`
+#### Consultar estado — `GET /games/{gameplayId}/state`
 
-Entrada: sem corpo. `afterSequence` é um cursor numérico não negativo; o padrão é `0`.
+Sem corpo. Lê exclusivamente a fonte autoritativa Redis durante a gameplay.
 
 Saída (`200 OK`):
 
 ```json
 {
-  "items": [
+  "gameplayId": "game-789",
+  "status": "ACTIVE",
+  "playerIds": ["player-123", "player-456"],
+  "secretsSet": {
+    "player-123": true,
+    "player-456": true
+  },
+  "guesses": [
     {
-      "sequence": 17,
-      "type": "GUESS",
-      "playerId": "player-456",
+      "playerId": "player-123",
       "digits": "1234",
       "result": {
         "correct": 1,
         "partial": 2
       },
-      "createdAt": "2026-10-05T14:32:00Z"
+      "createdAt": "2026-10-05T15:03:00Z"
     }
   ],
-  "nextSequence": 17
+  "finishReason": null
 }
 ```
 
-Retorna apenas palpites e feedbacks que o jogador autenticado pode ver, em ordem crescente de sequência. Não inclui senhas.
+A resposta nunca inclui as senhas. Sem autenticação, a proteção por jogador é apenas lógica e pode ser contornada; segredo em repouso e controle de acesso robusto são débitos de segurança.
 
-#### Consultar estado — `GET /games/{gameplayId}/state`
+### Concorrência e comportamento
 
-Entrada: sem corpo.
-
-Saída (`200 OK`):
-
-```json
-{
-  "gameplayId": "game-123",
-  "status": "ACTIVE",
-  "players": ["player-123", "player-456"],
-  "currentTurnPlayerId": "player-123",
-  "ownSecretSet": true,
-  "opponentSecretSet": true,
-  "gameplayOnline": true,
-  "suspended": false,
-  "lastSequence": 17
-}
-```
-
-A resposta é filtrada conforme o participante autenticado. Não expõe nenhuma senha, inclusive a senha do próprio jogador; a partida pode ser retomada consultando este recurso e `/updates`.
-
-### Ciclo, estado e classes de Gameplay
-
-Estados principais: `PENDING`, `ACCEPTED`, `DECLINED`, `ACTIVE`, `SUSPENDED` e `FINISHED`. O estado só passa a `ACTIVE` após aceite e definição das duas senhas. Recusa, suspensão e encerramento não apagam o histórico.
-
-Chaves por partida, usando uma *hash tag* comum no Redis Cluster:
-
-- `{gameplayId}:state`: participantes, status, turno, senhas protegidas, palpites e resultado.
-- `{gameplayId}:presence`: hash `playerId → lastSeenEpochMillis`.
-- `{gameplayId}:timeout`: contador de tolerância.
-- `{gameplayId}:sequence`: sequência monotônica dos eventos.
-- `{gameplayId}:outbox`: Redis Stream com eventos ainda não confirmados pela Persistência.
-
-Cada mudança valida o estado anterior e atualiza estado, sequência e outbox atomicamente (script Lua ou transação Redis). Isso evita aceitar, por exemplo, aceite e recusa simultâneos para o mesmo convite.
-
-Classes principais: `GameplayController`; `InvitationApplicationService`; `GameLifecycleService`; `RegisteredPlayerClient`; `HeartbeatApplicationService` / `PresencePolicy`; `GuessApplicationService` / `GuessEvaluator`; `RedisGameRepository`; `OutboxRelay` / `PersistenceRestClient`; `GameRecoveryService`.
+- Atualizações de estado associadas à mesma partida são atômicas no Redis.
+- Chaves específicas por gameplay isolam operações entre partidas; isso evita um lock global, mas não evita hot key nem contenção dentro de uma partida concorrente.
+- O frontend controla o fluxo de turnos. Corridas, requests simultâneos ou retries podem gerar registros duplicados ou sequência de jogo inesperada; backend não oferece idempotência ponta a ponta na MVP.
 
 ## 2. Persistência
 
-### Responsabilidade e armazenamento
+### Responsabilidade e consistência
 
-Persistência cadastra jogadores, recebe eventos/snapshots do ciclo da partida e conserva o histórico confiável. O PostgreSQL é append-only para registros de partida: eventos anteriores não são alterados nem apagados. Cada evento possui `eventId` único e sequência crescente por partida; o maior `sequence` válido determina a visão mais recente.
+Persistência confirma existência de IDs na inicialização/entrada, antes da partida ativa, e recebe atualizações do estado de forma assíncrona. PostgreSQL mantém registros append-only ordenados pelo timestamp emitido pelo componente Gameplay. O banco não é consultado para obter o estado de uma partida ativa; Redis é a fonte de verdade corrente e o banco é histórico eventualmente consistente.
 
-**Stack proposta:** Amazon RDS for PostgreSQL Multi-AZ, Amazon MemoryDB compatível com Redis OSS para estado/outbox, ECS/Fargate para os módulos, ALB para roteamento HTTPS, Cognito para identidade/JWT, Secrets Manager/KMS para segredos e CloudWatch para observabilidade.
+A emissão assíncrona não bloqueia a thread de Gameplay. Na MVP não há garantia de durabilidade do canal intermediário, limite/tamanho de fila, polling, retry, replay, idempotência ponta a ponta ou reconciliação automatizada. Uma falha pode atrasar ou perder atualização histórica.
 
 ### Contratos HTTP de Persistência
 
 | Método e endpoint | Entrada | Saída de sucesso |
 |---|---|---|
-| `POST /players` | JSON: `publicName` opcional | `201 Created` para cadastro novo; `200 OK` quando o perfil autenticado já existe |
-| `GET /internal/v1/players/{playerId}` | Sem corpo | `200 OK`: perfil mínimo do jogador; `404` se inexistente |
-| `POST /internal/v1/game-records` | JSON: evento imutável completo | `201 Created` para evento novo; `200 OK` em retry idempotente |
-| `GET /internal/v1/games/{gameplayId}/latest` | Sem corpo | `200 OK`: último snapshot persistido; `404` se não houver histórico |
+| `GET /internal/v1/players/{playerId}` | Sem corpo | `200 OK`: `{ "playerId": "...", "exists": true }`; `404` se inexistente |
+| `POST /internal/v1/game-records` | JSON: `gameplayId`, `gameplayTimestamp`, `recordType`, `state` | `202 Accepted`: aceito para gravação assíncrona; não representa garantia de gravação durável |
 
-#### Cadastrar jogador — `POST /players`
+As rotas `/internal` são destinadas a comunicação entre serviços, mas a autenticação mútua/segurança forte entre serviços não é entregue na MVP e é débito técnico. A rota de verificação é usada antes de ativar uma partida, não a cada ação de gameplay.
 
-O `cognitoSubject` vem exclusivamente do JWT e não pode ser enviado/substituído pelo cliente. `publicName` é opcional.
+#### Validar ID — `GET /internal/v1/players/{playerId}`
 
-Entrada:
-
-```json
-{
-  "publicName": "Ana"
-}
-```
-
-Saída para perfil novo (`201 Created`) ou já existente (`200 OK`):
-
-```json
-{
-  "playerId": "player-123",
-  "publicName": "Ana",
-  "createdAt": "2026-10-05T14:00:00Z"
-}
-```
-
-A restrição única em `cognito_subject` garante cadastro único; chamadas repetidas retornam o mesmo perfil sem duplicá-lo. Se o corpo for omitido, `publicName` é `null` até ser definido por uma operação suportada.
-
-#### Verificar jogador — `GET /internal/v1/players/{playerId}`
-
-Rota privada entre serviços; sem corpo. Saída (`200 OK`):
+Sem corpo. Saída para ID existente (`200 OK`):
 
 ```json
 {
@@ -298,100 +255,77 @@ Rota privada entre serviços; sem corpo. Saída (`200 OK`):
 }
 ```
 
-Se o jogador não existir, retorna `404 Not Found` com o envelope de erro comum. Gameplay usa esta consulta antes de abrir o convite e pode manter cache de IDs confirmados.
+ID inexistente retorna `404 Not Found`. Uma falha ou timeout da consulta é erro de dependência e não deve ser interpretado como inexistência.
 
-#### Registrar evento — `POST /internal/v1/game-records`
+#### Receber atualização — `POST /internal/v1/game-records`
 
-Rota privada chamada pelo relay da outbox. Cada registro é imutável e inclui o snapshot necessário para auditoria/recuperação.
+O componente Gameplay gera `gameplayTimestamp` ao produzir a atualização. O banco mantém versões históricas append-only; quando houver múltiplas atualizações para uma partida, a ordem histórica é determinada por esse timestamp. A MVP não adiciona identificador idempotente de evento nem sequência monotônica dedicada.
 
 Entrada:
 
 ```json
 {
-  "eventId": "evt-123",
-  "gameplayId": "game-123",
-  "sequence": 17,
-  "eventType": "GUESS_SUBMITTED",
-  "actorPlayerId": "player-123",
-  "recordedAt": "2026-10-05T14:32:00Z",
-  "snapshot": {
+  "gameplayId": "game-789",
+  "gameplayTimestamp": "2026-10-05T15:03:00.123Z",
+  "recordType": "GUESS_RECORDED",
+  "state": {
     "status": "ACTIVE",
-    "publicEvent": {
-      "type": "GUESS",
-      "digits": "1234",
-      "result": {
-        "correct": 1,
-        "partial": 2
+    "playerIds": ["player-123", "player-456"],
+    "guesses": [
+      {
+        "playerId": "player-123",
+        "digits": "1234",
+        "result": {
+          "correct": 1,
+          "partial": 2
+        }
       }
-    }
+    ]
   }
 }
 ```
 
-Saída para novo registro (`201 Created`):
+Resposta (`202 Accepted`):
 
 ```json
 {
-  "eventId": "evt-123",
-  "gameplayId": "game-123",
-  "sequence": 17,
-  "stored": true
+  "gameplayId": "game-789",
+  "accepted": true,
+  "receivedAt": "2026-10-05T15:03:00.130Z"
 }
 ```
 
-Saída para reenvio já persistido (`200 OK`):
+`202` confirma aceitação para processamento, não commit durável no PostgreSQL. O mecanismo de fila/processamento, retenção dos pendentes e comportamento após falha ainda não são garantidos na MVP.
 
-```json
-{
-  "eventId": "evt-123",
-  "gameplayId": "game-123",
-  "sequence": 17,
-  "stored": false,
-  "duplicate": true
-}
-```
+### Modelo de dados proposto
 
-`eventId` e `(gameplayId, sequence)` possuem restrições únicas. Um `eventId` repetido com o mesmo conteúdo é reconhecido como duplicata; conteúdo conflitante para a mesma identidade/sequência é rejeitado com `409 Conflict`. A outbox só confirma/remove o evento pendente após a confirmação da Persistência.
+- `players`: IDs já cadastrados e campos necessários à validação de existência. A origem e o fluxo prévio de cadastro são externos ao escopo desta documentação.
+- `game_records`: chave primária interna do banco, `gameplay_id`, `gameplay_timestamp`, `record_type` e `state` (por exemplo, `JSONB`). Registros são append-only; não são atualizados para simular o estado atual.
+- Senhas não devem ser retornadas em APIs de leitura ou expostas em logs. Proteção de segredos em repouso e autorização robusta são riscos/debitos da MVP a serem tratados antes de dados reais sensíveis.
 
-#### Recuperar último snapshot — `GET /internal/v1/games/{gameplayId}/latest`
+### Persistência assíncrona, latência e ordem
 
-Rota privada entre serviços; sem corpo. Saída (`200 OK`):
+Falhas ou lentidão da persistência não devem prender a thread que atende a gameplay; o cliente continua usando o estado em Redis. A consulta de existência do jogador é exceção pré-jogo e pode adicionar latência à criação/entrada. Durante uma sessão ativa não se consulta o banco.
 
-```json
-{
-  "gameplayId": "game-123",
-  "sequence": 17,
-  "eventId": "evt-123",
-  "recordedAt": "2026-10-05T14:32:00Z",
-  "snapshot": {
-    "status": "ACTIVE"
-  }
-}
-```
+O timestamp vem do componente Gameplay e define a ordem pretendida dos registros no banco. Igualdade de timestamps, múltiplas instâncias com relógios diferentes, reordenação de chegada, duplicatas, perda na fila e ausência de idempotência permanecem riscos aceitos; não há garantia técnica de ordenação total apenas com timestamp.
 
-Retorna o registro de maior sequência válida. Se ainda não houver registros para a partida, retorna `404 Not Found`.
+### Stack e implantação
 
-### Fluxo de gravação, recuperação e classes de Persistência
+Java 21 / Spring Boot e separação lógica Gameplay/Persistência são propostas de implementação. Redis e PostgreSQL são os armazenamentos previstos. Parâmetros de durabilidade, redundância, failover, rede e serviço cloud não são garantidos aqui. A MVP aceita falha/perda de dados do Redis como débito técnico.
 
-O cadastro de jogador é gravado diretamente no PostgreSQL por `PlayerController` → `PlayerRegistrationService.registerOnce` → `PlayerRepository`. O `cognito_subject` tem restrição única.
+## Débitos técnicos da MVP
 
-Para partidas, Gameplay atualiza Redis e outbox primeiro e responde sem esperar pelo banco. `OutboxRelay` envia cada evento pela API REST privada, com retries e backoff; Persistência grava de forma idempotente e só então confirma o evento. Quando a API ou o banco está indisponível, a outbox mantém os eventos pendentes. O Redis deve estar configurado com durabilidade e replicação Multi-AZ.
+1. **Autenticação/autorização:** sem login, sessão ou token; IDs digitados podem ser falsificados.
+2. **Resiliência da persistência assíncrona:** sem gestão de fila/outbox, polling, retry, limite de pendências ou confirmação durável; atualizações podem ser perdidas.
+3. **Idempotência e ordenação:** sem idempotência ponta a ponta/ID de evento e sem sequência monotônica; timestamps podem empatar ou divergir entre instâncias.
+4. **Durabilidade/recuperação do cache:** configuração padrão, aceitação de perda quando Redis falha e ausência de replay/reconstrução da partida.
+5. **Concorrência/turnos:** alternância controlada pelo frontend; backend pode receber palpites simultâneos e não oferece idempotência para retries.
+6. **Escala do estado:** lista de palpites/resultados cresce dentro de uma única chave por partida; pressão de memória e hot key não são gerenciadas na MVP.
+7. **Disponibilidade e capacidade:** falhas de zona/região e limites do Redis, PostgreSQL e serviços são aceitos sem SLO, RTO/RPO ou teste de carga.
+8. **Segurança de serviços e segredos:** sem proteção forte de rotas internas, autorização confiável por participante ou configuração abrangente de segredos/cifra.
+9. **Contratos e observabilidade:** sem versionamento/OpenAPI/Swagger; observabilidade limitada a logs da aplicação.
+10. **Testes e mecanismos de resiliência:** somente testes unitários e integrados; circuit breaker, retry, timeout/fallback abrangentes e testes de falha ficam para depois.
 
-Tabelas propostas:
+## Referências AWS
 
-- `players`: `player_id`, `cognito_subject` (único), `created_at` e `public_name`.
-- `game_records`: `event_id` (PK), `gameplay_id`, `sequence`, `event_type`, `actor_player_id`, `recorded_at` e `snapshot` (`JSONB`), com restrição única em `(gameplay_id, sequence)`.
-
-Senhas armazenadas em snapshots internos devem ser protegidas criptograficamente em repouso; nunca são devolvidas ao oponente nem registradas em logs. Para recuperar o estado quente, Gameplay carrega o último snapshot persistido e reaplica eventos ainda pendentes na outbox.
-
-Classes principais: `PlayerController`; `PlayerRegistrationService`; `PlayerRepository`; `PersistenceController`; `PersistGameRecordService`; `GameRecordRepository`.
-
-### Consistência, disponibilidade e CAP
-
-Gameplay prioriza disponibilidade quando a API de Persistência ou o banco está indisponível: mantém estado/outbox em MemoryDB e replica depois. Se uma partição do Redis impedir autoridade única para uma partida, Gameplay rejeita escritas conflitantes. Persistência prioriza consistência dos registros; não se promete consistência e disponibilidade simultâneas durante partições. A convergência posterior usa retries idempotentes e sequência por partida.
-
-### Referências AWS
-
-- [ECS com AWS Fargate](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html)
-- [Amazon MemoryDB](https://docs.aws.amazon.com/memorydb/latest/devguide/what-is-memorydb.html)
-- [Clusters Multi-AZ do Amazon RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/multi-az-db-clusters-concepts.html)
+A escolha de produto/serviço AWS, alta disponibilidade, durabilidade, backup e recuperação deve ser definida em uma etapa futura; esta MVP não declara garantias gerenciadas Multi-AZ ou recuperação regional.

@@ -1,36 +1,30 @@
 # Jogo de senha — MVP
 
-Documentação de arquitetura para um MVP de jogo de senha entre dois jogadores. Cada jogador define uma senha de quatro algarismos distintos; os jogadores alternam palpites e recebem a quantidade de algarismos corretos e parciais.
+Documentação de arquitetura para um MVP de jogo de senha entre dois jogadores. Cada pessoa usa seu ID de usuário já cadastrado; o oponente entra com seu ID e o `gameplayId` compartilhado pelo criador da partida. Os jogadores definem senhas de quatro algarismos distintos, alternam palpites pela interface e recebem contagens de corretos e parciais.
 
-> **Estado do repositório:** atualmente contém documentação e proposta de arquitetura; o código da aplicação ainda não foi criado.
+> **Estado do repositório:** contém documentação e proposta de arquitetura; o código da aplicação ainda não foi criado.
 
-## Arquitetura proposta
+## Arquitetura resumida
 
-- **Gameplay:** API Java 21 / Spring Boot 3, responsável pelo ciclo da partida, convites, senhas, palpites, presença e estado operacional.
-- **Persistência:** API responsável pelo cadastro de jogadores e pelo histórico imutável de eventos das partidas.
-- **Estado ativo e outbox:** Amazon MemoryDB compatível com Redis OSS, com atualizações atômicas por partida e relay assíncrono.
-- **Histórico:** Amazon RDS for PostgreSQL Multi-AZ, com deduplicação por `eventId` e ordenação por sequência da partida.
-- **Identidade e infraestrutura:** Amazon Cognito, ALB, ECS/Fargate, Secrets Manager/KMS e CloudWatch.
-- Os módulos podem ser implantados juntos ou como serviços separados; a comunicação entre eles permanece REST.
+- **Gameplay:** controla partida, senhas, palpites, resultados e presença.
+- **Redis:** fonte da verdade durante a partida ativa; mantém duas chaves por partida: uma para presença/timeout e outra para o estado acumulativo da gameplay.
+- **Persistência:** PostgreSQL append-only recebe atualizações de forma assíncrona e tem consistência eventual. Não é consultado para responder à gameplay ativa.
+- **Heartbeat:** uma chamada por segundo por jogador; se qualquer jogador ficar mais de cinco segundos sem heartbeat, a partida termina por timeout.
+- **Identidade:** na MVP não há login, sessão ou token; os IDs são digitados e validados no início/entrada. Isso é uma limitação de segurança explicitamente aceita.
+- A emissão à Persistência não deve bloquear a thread de gameplay, mas tamanho de fila, polling, retry, replay e garantia ponta a ponta não são gerenciados na MVP.
 
 ## Documentação
 
-- [Resumo final do MVP](backend/mvp/arquitetura-mvp-final.md) — regras, fluxo da partida e visão geral.
-- [Especificação técnica](backend/mvp/tech-docs/arquitetura-tecnica-mvp.md) — arquitetura, endpoints REST, payloads de entrada/saída, armazenamento e recuperação.
-- [Problemas possíveis e estratégias de mitigação](backend/mvp/tech-docs/riscos-e-mitigacoes-mvp.md) — riscos técnicos, impactos, sinais e ações de mitigação.
-- [Proposta inicial de arquitetura](backend/proposta%20inicial/arquitetura-backend-senha.md) — primeira proposta conceitual.
+- [Resumo final do MVP](backend/mvp/arquitetura-mvp-final.md) — regras, fluxo, decisões e limites.
+- [Especificação técnica](backend/mvp/tech-docs/arquitetura-tecnica-mvp.md) — arquitetura, contratos HTTP, payloads e modelos de dados.
+- [Problemas possíveis e débitos técnicos](backend/mvp/tech-docs/riscos-e-mitigacoes-mvp.md) — matriz de problemas, status na MVP, motivos e caminhos de evolução.
+- [Proposta inicial de arquitetura](backend/proposta%20inicial/arquitetura-backend-senha.md) — documento conceitual inicial; pode refletir premissas anteriores à definição atual da MVP.
 
-## Contratos REST
+## Escopo conhecido
 
-A especificação detalhada está na documentação técnica. Em resumo, as decisões sem payload usam `PATCH`, como aceitar/recusar convite e atualizar presença; operações com dados de entrada usam `PUT`, como definir senha e enviar palpite. A criação de recursos/eventos usa `POST`, e as consultas usam `GET`.
+A MVP aceita perda de dados se Redis falhar, não implementa replay, não garante idempotência ponta a ponta e deixa a alternância dos turnos sob controle do frontend. A análise completa e os motivos desses débitos estão na [documentação de riscos](backend/mvp/tech-docs/riscos-e-mitigacoes-mvp.md).
 
-Todas as rotas e estruturas de entrada/saída, autenticação, respostas de erro e limites de visibilidade estão descritos na especificação técnica.
-
-## Ponto de atenção conhecido
-
-A regra de timeout do heartbeat ainda precisa de confirmação: conforme registrada, pode suspender uma partida online após poucas chamadas. Esse comportamento está destacado na documentação técnica e na análise de riscos e deve ser resolvido antes da implementação.
-
-## Estrutura atual
+## Estrutura
 
 ```text
 .
