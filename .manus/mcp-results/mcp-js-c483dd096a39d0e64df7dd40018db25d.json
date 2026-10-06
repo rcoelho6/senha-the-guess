@@ -1,0 +1,8 @@
+In-app Browser JS state was preserved. Completed actions were not rolled back; refresh stale UI handles and continue only the remaining work.
+{"code":"NAVIGATION_INTERRUPTED","method":"browser_navigate","callIndex":2,"nextAction":"inspect_before_retry"}
+ERROR NAVIGATION_INTERRUPTED
+The connection was interrupted. Retry navigation before retrying page actions; do not automatically resubmit form data.
+{"control":{"documentRevision":"rev_462f55f0-0e82-4a0c-8fc2-1883fb1fcbbd","error":{"code":"NAVIGATION_INTERRUPTED","retryable":true},"requiresSnapshot":false,"status":"error","tabId":"tab_4d83be9e-649d-4cc3-9c08-b6665a43c8a9"},"kind":"error","page":{"contentTrust":"untrusted","url":"http://127.0.0.1:8765/mobile/proposta-app.html"},"schema":"manus.browser/v1","warnings":["ERR_CONNECTION_TIMED_OUT (-118)"]}
+ERROR NAVIGATION_INTERRUPTED
+The connection was interrupted. Retry navigation before retrying page actions; do not automatically resubmit form data.
+{"control":{"documentRevision":"rev_462f55f0-0e82-4a0c-8fc2-1883fb1fcbbd","error":{"code":"NAVIGATION_INTERRUPTED","retryable":true},"requiresSnapshot":false,"status":"error","tabId":"tab_4d83be9e-649d-4cc3-9c08-b6665a43c8a9"},"kind":"error","page":{"contentTrust":"untrusted","url":"http://127.0.0.1:8765/mobile/proposta-app.html"},"schema":"manus.browser/v1","warnings":["ERR_CONNECTION_TIMED_OUT (-118)"]}

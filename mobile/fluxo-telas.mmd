@@ -1,0 +1,26 @@
+flowchart TB
+    A[Boas-vindas] --> B{Já possui perfil / ID?}
+    B -- Não --> C[Cadastro de perfil]
+    B -- Sim --> D[Acessar com ID do jogador]
+    C --> D
+    D --> E[Início / lobby]
+
+    E --> F[Criar partida]
+    F --> G[Informar ID do oponente]
+    G --> H[Convite: compartilhar gameplayId]
+    H --> I[Definir a própria senha]
+    H -. no outro aparelho .-> J[Inserir gameplayId existente]
+    J --> K[Entrar na partida]
+    K --> I
+    I --> L{Oponente entrou e ambos definiram senha?}
+    L -- Ainda não --> M[Aguardando no lobby]
+    M --> L
+    L -- Sim --> N[Partida ativa]
+
+    N --> O[Enviar palpite]
+    N --> P[Receber palpite e atualizar estado]
+    O --> Q{Acertou / houve timeout?}
+    P --> Q
+    Q -- Não --> N
+    Q -- Sim --> R[Resultado da partida]
+    R --> E
