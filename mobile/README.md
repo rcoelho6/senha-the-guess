@@ -47,3 +47,9 @@ Os botões do protótipo simulam esses passos localmente. Antes da integração,
 ## Direção visual
 
 Proposta Android em tema claro, inspiração Material 3, fundo azul-noite no entorno do aparelho, cards claros, acento verde-menta e dígitos em tiles. A navegação lateral do protótipo é apenas para revisão; no app, a navegação principal será feita pelos CTAs e pelo lobby.
+
+
+
+[Proposta APP Android](https://htmlpreview.github.io/?https://github.com/rcoelho6/senha-the-guess/blob/feature/first-mvp/mobile/proposta-app.html)
+
+
