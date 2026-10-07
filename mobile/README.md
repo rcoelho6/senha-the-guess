@@ -53,3 +53,7 @@ Proposta Android em tema claro, inspiração Material 3, fundo azul-noite no ent
 [Proposta APP Android](https://htmlpreview.github.io/?https://github.com/rcoelho6/senha-the-guess/blob/feature/first-mvp/mobile/proposta-app.html)
 
 
+
+## App Android nativo
+
+A implementação inicial em Kotlin/Jetpack Compose está em [`source/`](source/). Ela cobre a jornada principal em modo de demonstração local; consulte [`source/README.md`](source/README.md) para abrir no Android Studio, executar e ver os pontos ainda sem integração com backend.
